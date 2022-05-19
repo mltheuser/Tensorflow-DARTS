@@ -69,6 +69,7 @@ class MixedOp(ArchitectureSearchLayer):
         assert self._num_ops >= self._num_on_samples
 
     def __call__(self, x, training=None, *args, **kwargs):
+        # TODO Breaks for some reason.
         return tf.cond(
             tf.logical_and(self._trainable_architecture, training),
             true_fn=lambda: self.stochastic_call(x, training),
@@ -90,8 +91,14 @@ class MixedOp(ArchitectureSearchLayer):
         else:
             expanded_x = tf.repeat(tf.expand_dims(x, axis=0), repeats=self._num_on_samples, axis=0)
             t_training = tf.repeat(tf.expand_dims(training, axis=0), repeats=self._num_on_samples, axis=0)
-            return tf.map_fn(fn=self.call_op, elems=(op_ids, expanded_x, t_training),
-                             fn_output_signature=tf.float32)
+            # TODO map_fn would be better but breaks.
+            return tf.vectorized_map(fn=self.call_op, elems=(op_ids, expanded_x, t_training))
+
+    def evaluate_remaining(self, x, training, not_evaluated_indices, op_results):
+        new_op_results = self.evaluate_operations_partially(x, training, not_evaluated_indices)
+        complete_op_results = tf.concat([op_results, new_op_results], axis=0)
+
+        return complete_op_results
 
     def non_stochastic_call(self, x, training):
         top_k_ids = tf.math.top_k(self._logits, k=self._num_on_samples).indices
@@ -205,12 +212,6 @@ class BinaryMixedOp(MixedOp):
         op_result = self.ops_times_mask_binary(x, training, op_results, mask, sampled_indices_on, sampled_indices_eval)
         return op_result
 
-    def evaluate_remaining(self, x, training, not_evaluated_indices, op_results):
-        new_op_results = self.evaluate_operations_partially(x, training, not_evaluated_indices)
-        complete_op_results = tf.concat([op_results, new_op_results], axis=0)
-
-        return complete_op_results
-
     @tf.custom_gradient
     def ops_times_mask_binary(self, x, training, op_results, mask, sampled_indices_on, sampled_indices_eval):
         def backward(dop_result):
@@ -254,7 +255,6 @@ class BinaryMaskedMixedOp(PartiallyEvaluatedMixOp, BinaryMixedOp):
         )
 
 
-@tf.function
 def moving_average_update_graph(lr, moving_average, op_results, sampled_indices_eval):
     op_results_mean = tf.reduce_mean(op_results, axis=1)
 
@@ -281,7 +281,7 @@ class BinaryMovingAverageMixedOp(PartiallyEvaluatedMixOp):
                                                                                self._num_on_samples)
 
         # this works because sampled_indices_on and sampled_indices_eval are always sorted in ascending order.
-        op_results = tf.stack([self._ops[index_on](x, training=training) for index_on in sampled_indices_on])
+        op_results = self.evaluate_operations_partially(x, training, sampled_indices_on)
 
         op_result = self.ops_times_mask_binary_ma(x, training, op_results, mask, sampled_indices_on,
                                                   sampled_indices_eval)
@@ -292,27 +292,25 @@ class BinaryMovingAverageMixedOp(PartiallyEvaluatedMixOp):
         def backward(dop_result):
             mask_shape = tf.shape(mask)
             eval_mask = tf.reduce_sum(tf.one_hot(sampled_indices_eval, depth=mask_shape[0]), axis=0)
-            not_evalated_mask = tf.logical_and(tf.cast(eval_mask, dtype=tf.bool),
+            not_evaluated_mask = tf.logical_and(tf.cast(eval_mask, dtype=tf.bool),
                                                tf.logical_not(tf.cast(mask, dtype=tf.bool)))
-            not_evalated_indices = tf.cast(tf.reshape(tf.where(not_evalated_mask), shape=(-1,)), dtype=tf.int32)
+            not_evaluated_indices = tf.cast(tf.reshape(tf.where(not_evaluated_mask), shape=(-1,)), dtype=tf.int32)
 
-            if not_evalated_indices.shape[0] == 0:
-                complete_op_results = op_results
-            else:
-                new_op_results = tf.stack([
-                    self._ops[index_eval](x, training=training) for index_eval in not_evalated_indices
-                ])
-
-                complete_op_results = tf.concat([op_results, new_op_results], axis=0)
+            complete_op_results = tf.cond(
+                tf.equal(tf.shape(not_evaluated_indices)[0], 0),
+                true_fn=lambda: op_results,
+                false_fn=lambda: self.evaluate_remaining(x, training, not_evaluated_indices, op_results),
+            )
 
             if self._moving_average is None:
                 element_shape = tf.shape(complete_op_results)[2:]
-                self._moving_average = tf.zeros(shape=[mask_shape[0]] + element_shape)
+                self._moving_average = tf.zeros(
+                    shape=tf.concat([tf.expand_dims(mask_shape[0], axis=0), element_shape], axis=0),
+                )
 
-            complete_op_results_indices = tf.concat([sampled_indices_on, not_evalated_indices], axis=0)
+            complete_op_results_indices = tf.concat([sampled_indices_on, not_evaluated_indices], axis=0)
             self._moving_average, local_activation_estimate = tf.stop_gradient(
-                moving_average_update_graph(self._lr, self._moving_average, complete_op_results,
-                                            complete_op_results_indices)
+                moving_average_update_graph(self._lr, self._moving_average, complete_op_results, complete_op_results_indices)
             )
 
             dop_sum_reshaped = tf.reshape(tf.reduce_sum(dop_result, axis=0), shape=(1, -1))
@@ -350,7 +348,7 @@ class BinaryProxylessNASStyleMixedOp(PartiallyEvaluatedMixOp, BinaryMixedOp):
         self.latest_mask_involved = tf.reduce_sum(tf.one_hot(sampled_indices_eval, depth=logits.shape[0]), axis=0)
 
         # this works because sampled_indices_on and sampled_indices_eval are always sorted in ascending order.
-        op_results = tf.stack([self._ops[index_on](x, training=training) for index_on in sampled_indices_on])
+        op_results = self.evaluate_operations_partially(x, training, sampled_indices_on)
 
         op_result = self.ops_times_mask_binary(x, training, op_results, mask, sampled_indices_on, sampled_indices_eval)
         return op_result

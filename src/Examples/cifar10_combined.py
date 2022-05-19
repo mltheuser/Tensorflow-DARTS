@@ -3,10 +3,9 @@ import tensorflow as tf
 tf.get_logger().setLevel('ERROR')
 
 from tensorflow.keras import datasets, layers
-import matplotlib.pyplot as plt
 
-from mixed_ops import ContinuousMixedOp, ArchitectureSearchModel, ArchitectureSearchLayer, BinaryMixedOp, \
-    BinaryMaskedMixedOp, BinaryMovingAverageMixedOp, BinaryProxylessNASStyleMixedOp
+from src.mixed_ops import ArchitectureSearchModel, BinaryMixedOp, ContinuousMixedOp, BinaryMaskedMixedOp, \
+    BinaryMovingAverageMixedOp, BinaryProxylessNASStyleMixedOp
 
 (train_images, train_labels), (test_images, test_labels) = datasets.cifar10.load_data()
 
@@ -14,7 +13,7 @@ from mixed_ops import ContinuousMixedOp, ArchitectureSearchModel, ArchitectureSe
 train_images, test_images = train_images / 255.0, test_images / 255.0
 
 
-MixedOpUsed = BinaryMixedOp
+MixedOpUsed = BinaryProxylessNASStyleMixedOp
 
 
 class CustomModel(ArchitectureSearchModel):
@@ -31,7 +30,7 @@ class CustomModel(ArchitectureSearchModel):
                     tf.keras.layers.Dense(32, activation='relu'),
                     layers.Conv2D(32, (3, 3), activation='relu', padding='same', input_shape=(32, 32, 3)),
                 ],
-                num_on_samples=1,
+                num_on_samples=1, num_eval_samples=2
             ),
             layers.MaxPooling2D((2, 2)),
             layers.Conv2D(64, (3, 3), activation='relu'),
@@ -44,7 +43,7 @@ class CustomModel(ArchitectureSearchModel):
                     layers.Dense(64, activation='relu'),
                     layers.Dense(64, activation=None),
                 ],
-                num_on_samples=1,
+                num_on_samples=1, num_eval_samples=2
             ),
             layers.Dense(10),
         ]
