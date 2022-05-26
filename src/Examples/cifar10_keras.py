@@ -12,7 +12,7 @@ from src.mixed_ops import ArchitectureSearchModel, BinaryMixedOp, ContinuousMixe
 # Normalize pixel values to be between 0 and 1
 train_images, test_images = train_images / 255.0, test_images / 255.0
 
-MixedOpUsed = BinaryMixedOp
+MixedOpUsed = BinaryMaskedMixedOp
 
 
 class CustomSequential(tf.keras.layers.Layer):
@@ -27,6 +27,10 @@ class CustomSequential(tf.keras.layers.Layer):
 
 
 def convolution_options(): return [
+    CustomSequential([
+        layers.Conv2D(16, (3, 3), activation='relu', padding='same'),
+        tf.keras.layers.Dense(64)
+    ]),
     CustomSequential([
         layers.Conv2D(32, (3, 3), activation='relu', padding='same'),
         tf.keras.layers.Dense(64)
@@ -48,6 +52,11 @@ def dense_options(): return [
         tf.keras.layers.Dense(200, activation='relu'),
         tf.keras.layers.Dense(64)
     ]),
+    CustomSequential([
+        tf.keras.layers.Dense(2000, activation='relu'),
+        tf.keras.layers.Dense(2000, activation='relu'),
+        tf.keras.layers.Dense(64)
+    ]),
 ]
 
 
@@ -63,45 +72,40 @@ class CustomModel(ArchitectureSearchModel):
         self.internal_layers = [
             MixedOpUsed(
                 convolution_options(),
-                num_on_samples=1,  # num_eval_samples=1,
+                num_on_samples=1, num_eval_samples=1,
                 name='conv_mixed_op_1',
             ),
             MixedOpUsed(
                 pooling_options(),
-                num_on_samples=1,  # num_eval_samples=1,
+                num_on_samples=1, num_eval_samples=1,
                 name='pool_mixed_op_1',
             ),
             MixedOpUsed(
                 convolution_options(),
-                num_on_samples=1,  # num_eval_samples=1,
+                num_on_samples=1, num_eval_samples=1,
                 name='conv_mixed_op_2',
             ),
             MixedOpUsed(
                 pooling_options(),
-                num_on_samples=1,  # num_eval_samples=1,
+                num_on_samples=1, num_eval_samples=1,
                 name='pool_mixed_op_2',
             ),
             MixedOpUsed(
                 convolution_options(),
-                num_on_samples=1,  # num_eval_samples=1,
+                num_on_samples=1, num_eval_samples=1,
                 name='conv_mixed_op_3',
             ),
 
             layers.Flatten(),
             MixedOpUsed(
                 dense_options(),
-                num_on_samples=1,  # num_eval_samples=1,
+                num_on_samples=1, num_eval_samples=1,
                 name='dense_mixed_op_1',
             ),
             MixedOpUsed(
                 dense_options(),
-                num_on_samples=1,  # num_eval_samples=1,
+                num_on_samples=1, num_eval_samples=1,
                 name='dense_mixed_op_2',
-            ),
-            MixedOpUsed(
-                dense_options(),
-                num_on_samples=1,  # num_eval_samples=1,
-                name='dense_mixed_op_3',
             ),
             layers.Dense(10),
         ]
@@ -182,7 +186,7 @@ def main():
 
     print(model.architecture_summary())
 
-    model.fit(train_images, train_labels, epochs=2,
+    model.fit(train_images, train_labels, epochs=10,
               validation_data=(test_images, test_labels))
 
     test_acc, _ = model.evaluate(test_images, test_labels, verbose=2)

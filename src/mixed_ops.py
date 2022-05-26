@@ -1,10 +1,6 @@
 from abc import abstractmethod
 from typing import Callable, List
 
-import os
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-
 import tensorflow as tf
 
 
@@ -71,10 +67,6 @@ class MixedOp(ArchitectureSearchLayer):
     @abstractmethod
     def stochastic_call(self, x, training, *args, **kwargs):
         pass
-
-    def evaluate_operations_partially_graph(self, x, training, op_ids):
-        op_results = tf.stack([self._ops[op_id](x, training=training) for op_id in op_ids])
-        return op_results, tf.shape(op_results)
 
     def evaluate_operations_partially(self, x, training, op_ids):
         if tf.executing_eagerly():
@@ -203,23 +195,22 @@ class BinaryMixedOp(MixedOp):
     @tf.custom_gradient
     def ops_times_mask_binary(self, x, training, op_results, mask, sampled_indices_on, sampled_indices_eval):
         def backward(dop_result):
-            mask_shape = tf.shape(mask)
+            mask_shape = mask.shape
             eval_mask = tf.reduce_sum(tf.one_hot(sampled_indices_eval, depth=mask_shape[0]), axis=0)
             not_evaluated_mask = tf.logical_and(tf.cast(eval_mask, dtype=tf.bool),
                                                 tf.logical_not(tf.cast(mask, dtype=tf.bool)))
             not_evaluated_indices = tf.reshape(tf.cast(tf.where(not_evaluated_mask), dtype=tf.int32), shape=(-1,))
 
-            complete_op_results = tf.cond(
-                tf.equal(tf.shape(not_evaluated_indices)[0], 0),
-                true_fn=lambda: op_results,
-                false_fn=lambda: self.evaluate_remaining(x, training, not_evaluated_indices, op_results),
-            )
+            if not_evaluated_indices.shape[0] == 0:
+                complete_op_results = op_results
+            else:
+                complete_op_results = self.evaluate_remaining(x, training, not_evaluated_indices, op_results)
 
             d_mask_ill_shaped = tf.reduce_sum(tf.reshape(
                 tf.multiply(tf.expand_dims(dop_result, axis=0), complete_op_results),
                 shape=(tf.shape(complete_op_results)[0], -1)), axis=-1)
 
-            op_results_shape = tf.shape(op_results)
+            op_results_shape = op_results.shape
             on_dmask = tf.scatter_nd(tf.expand_dims(sampled_indices_on, axis=-1),
                                      d_mask_ill_shaped[:op_results_shape[0]], shape=mask_shape)
 
