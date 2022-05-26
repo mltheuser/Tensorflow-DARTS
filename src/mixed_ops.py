@@ -1,14 +1,14 @@
 from abc import abstractmethod
 from typing import Callable, List
 
+import os
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
 import tensorflow as tf
 
 
 class ArchitectureSearchLayer(tf.keras.layers.Layer):
-    def __init__(self):
-        super().__init__()
-        self._trainable_architecture = tf.Variable(True)
-
     @property
     @abstractmethod
     def trainable_architecture_variables(self):
@@ -19,13 +19,8 @@ class ArchitectureSearchLayer(tf.keras.layers.Layer):
     def trainable_operational_variables(self):
         pass
 
-    @property
-    def trainable_architecture(self):
-        return tf.constant(self._trainable_architecture)
-
-    @trainable_architecture.setter
-    def trainable_architecture(self, value: bool):
-        self._trainable_architecture.assign(value)
+    def architecture_summary(self):
+        return f'{self.name}: {tf.math.softmax(self._logits, axis=0)}\n'
 
 
 class ArchitectureSearchModel(tf.keras.Model, ArchitectureSearchLayer):
@@ -45,54 +40,47 @@ class ArchitectureSearchModel(tf.keras.Model, ArchitectureSearchLayer):
             tov.remove(var)
         return tov
 
-    @property
-    def trainable_architecture(self):
-        return tf.constant(self._trainable_architecture)
-
-    @trainable_architecture.setter
-    def trainable_architecture(self, value: bool):
-        self._trainable_architecture.assign(value)
+    # TODO [Make this return a summary object]
+    def architecture_summary(self):
+        summary = ''
         for layer in self.layers:
             if isinstance(layer, ArchitectureSearchLayer):
-                layer.trainable_architecture = value
+                summary += layer.architecture_summary()
+        return summary
 
 
 class MixedOp(ArchitectureSearchLayer):
-    def __init__(self, operations: List[tf.keras.layers.Layer], num_on_samples: int):
-        super(MixedOp, self).__init__()
+    def __init__(self, operations: List[tf.keras.layers.Layer], num_on_samples: int, name=None):
+        super(MixedOp, self).__init__(name=name)
         self._num_on_samples = num_on_samples
 
         self._ops = operations
         self._num_ops = len(self._ops)
         self._logits = tf.Variable(1e-3 * tf.random.normal(shape=(self._num_ops,)))
 
+        # only used in graph mode.
+        self._output_shape = None
+
         assert self._num_ops >= self._num_on_samples
 
-    def __call__(self, x, training=None, *args, **kwargs):
-        # TODO Breaks for some reason.
-        return tf.cond(
-            tf.logical_and(self._trainable_architecture, training),
-            true_fn=lambda: self.stochastic_call(x, training),
-            false_fn=lambda: self.non_stochastic_call(x, training)
-        )
+    def __call__(self, x, stochastic=None, training=None, *args, **kwargs):
+        if stochastic:
+            return self.stochastic_call(x, training)
+        return self.non_stochastic_call(x, training)
 
     @abstractmethod
     def stochastic_call(self, x, training, *args, **kwargs):
         pass
 
-    def call_op(self, data):
-        op_id, x, training = data
-        op_results = [lambda: op(x, training=training) for op in self._ops]
-        return tf.switch_case(branch_index=op_id, branch_fns=op_results)
+    def evaluate_operations_partially_graph(self, x, training, op_ids):
+        op_results = tf.stack([self._ops[op_id](x, training=training) for op_id in op_ids])
+        return op_results, tf.shape(op_results)
 
     def evaluate_operations_partially(self, x, training, op_ids):
         if tf.executing_eagerly():
             return tf.stack([self._ops[op_id](x, training=training) for op_id in op_ids])
         else:
-            expanded_x = tf.repeat(tf.expand_dims(x, axis=0), repeats=self._num_on_samples, axis=0)
-            t_training = tf.repeat(tf.expand_dims(training, axis=0), repeats=self._num_on_samples, axis=0)
-            # TODO map_fn would be better but breaks.
-            return tf.vectorized_map(fn=self.call_op, elems=(op_ids, expanded_x, t_training))
+            raise Exception("MixedOps cannot currently run in graph mode. Future Tensorflow versions might change this.")
 
     def evaluate_remaining(self, x, training, not_evaluated_indices, op_results):
         new_op_results = self.evaluate_operations_partially(x, training, not_evaluated_indices)
@@ -123,7 +111,7 @@ class ContinuousMixedOp(MixedOp):
     def stochastic_call(self, x, training, *args, **kwargs):
         weights = tf.math.softmax(self._logits, axis=-1)
 
-        op_results = tf.stack([op(x, training=training) for op in self._ops])
+        op_results = self.evaluate_operations_partially(x, training, tf.range(tf.shape(self._logits)[0]))
 
         op_results_shape = tf.shape(op_results)
         shape_extension = tf.cast(op_results_shape[1:] / op_results_shape[1:], dtype=tf.int32)
@@ -185,8 +173,8 @@ def st_onehot_categorical(weights, num_eval_samples, num_on_samples=1):
 
 
 class PartiallyEvaluatedMixOp(MixedOp):
-    def __init__(self, operations: List[Callable], num_eval_samples: int, num_on_samples: int):
-        super().__init__(operations, num_on_samples)
+    def __init__(self, operations: List[Callable], num_eval_samples: int, num_on_samples: int, name=None):
+        super().__init__(operations, num_on_samples, name)
         self._num_eval_samples = num_eval_samples
 
         assert self._num_on_samples <= self._num_eval_samples
@@ -218,7 +206,7 @@ class BinaryMixedOp(MixedOp):
             mask_shape = tf.shape(mask)
             eval_mask = tf.reduce_sum(tf.one_hot(sampled_indices_eval, depth=mask_shape[0]), axis=0)
             not_evaluated_mask = tf.logical_and(tf.cast(eval_mask, dtype=tf.bool),
-                                               tf.logical_not(tf.cast(mask, dtype=tf.bool)))
+                                                tf.logical_not(tf.cast(mask, dtype=tf.bool)))
             not_evaluated_indices = tf.reshape(tf.cast(tf.where(not_evaluated_mask), dtype=tf.int32), shape=(-1,))
 
             complete_op_results = tf.cond(
@@ -293,7 +281,7 @@ class BinaryMovingAverageMixedOp(PartiallyEvaluatedMixOp):
             mask_shape = tf.shape(mask)
             eval_mask = tf.reduce_sum(tf.one_hot(sampled_indices_eval, depth=mask_shape[0]), axis=0)
             not_evaluated_mask = tf.logical_and(tf.cast(eval_mask, dtype=tf.bool),
-                                               tf.logical_not(tf.cast(mask, dtype=tf.bool)))
+                                                tf.logical_not(tf.cast(mask, dtype=tf.bool)))
             not_evaluated_indices = tf.cast(tf.reshape(tf.where(not_evaluated_mask), shape=(-1,)), dtype=tf.int32)
 
             complete_op_results = tf.cond(
@@ -302,6 +290,7 @@ class BinaryMovingAverageMixedOp(PartiallyEvaluatedMixOp):
                 false_fn=lambda: self.evaluate_remaining(x, training, not_evaluated_indices, op_results),
             )
 
+            # TODO [Find a way to init only once [This is what breaks the ma method]]
             if self._moving_average is None:
                 element_shape = tf.shape(complete_op_results)[2:]
                 self._moving_average = tf.zeros(
@@ -309,9 +298,10 @@ class BinaryMovingAverageMixedOp(PartiallyEvaluatedMixOp):
                 )
 
             complete_op_results_indices = tf.concat([sampled_indices_on, not_evaluated_indices], axis=0)
-            self._moving_average, local_activation_estimate = tf.stop_gradient(
-                moving_average_update_graph(self._lr, self._moving_average, complete_op_results, complete_op_results_indices)
+            self._moving_average, local_activation_estimate = moving_average_update_graph(
+                self._lr, self._moving_average, complete_op_results, complete_op_results_indices
             )
+            local_activation_estimate = tf.stop_gradient(local_activation_estimate)
 
             dop_sum_reshaped = tf.reshape(tf.reduce_sum(dop_result, axis=0), shape=(1, -1))
             ma_reshaped = tf.reshape(local_activation_estimate, shape=(tf.shape(local_activation_estimate)[0], -1))
