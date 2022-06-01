@@ -2,7 +2,7 @@
 
 A collection of MixedOperations for automatic architecture search.  
 The goal is to make architectural search more accessible.
-The collection therefore mainly contains operations with good scalability.  
+The collection therefore mainly contains operations with good scalability.
 These operations should be able to run on the personal computer even for non-trivial problems.
 
 For a quick start, have a look at the [Cifar10 example](./src/Examples/cifar10_keras.py) and read the short introduction below.
