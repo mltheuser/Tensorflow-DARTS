@@ -65,4 +65,4 @@ Returns a string specifying the current distribution in the MixedOps.
 
 Unfortunately, even after a long search, I could not find a way to wrap the call of the MixedOps as a tf.function.
 Therefore, the attempt will now throw an exception until further notice.
-If you have an idea how this can be achieved, please take a look at my related [stackoverflow thread](https://stackoverflow.com/questions/72360420/how-to-evaluate-only-a-random-subset-of-all-possible-operations-per-pass-inside/).
+If you have an idea how this can be achieved, please take a look at my related [stackoverflow thread](https://stackoverflow.com/questions/72360420/how-to-evaluate-only-a-random-subset-of-all-possible-operations-per-pass-inside/). 
